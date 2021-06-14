@@ -1,0 +1,194 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Importing Relevant Libraries
+
+```{r}
+
+library(XML)
+library( xml2 )
+
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(ggthemes)
+```
+
+# Constants
+
+```{r}
+xmlDataPath <- "../../Data/export.xml"
+```
+
+# Import XML
+```{r}
+xmlData <- xmlParse(xmlDataPath)
+class(xmlData)
+```
+
+# Investigating Structure of Data
+```{r}
+summary(xmlData)
+```
+
+```{r}
+rootElement = xmlRoot(xmlData)
+str_interp("Root element: ${xmlName(rootElement)}")
+sprintf("Number of entries: %s", prettyNum(xmlSize(rootElement), ,big.mark=",")) 
+```
+
+# Converting to Data Frame
+
+```{r}
+dfRecord <-   XML:::xmlAttrsToDataFrame(xmlData["//Record"])
+dfActivity <- XML:::xmlAttrsToDataFrame(xmlData["//ActivitySummary"])
+dfWorkout <-  XML:::xmlAttrsToDataFrame(xmlData["//Workout"])
+dfActivitySummary <-  XML:::xmlAttrsToDataFrame(xmlData["//ActivitySummary"])
+dfWorkoutEvent <-  XML:::xmlAttrsToDataFrame(xmlData["//WorkoutEvent"])
+```
+
+# Investigating Data
+
+### Record Element
+
+Formatting data
+```{r}
+recordTypePrefix = c("HKQuantityTypeIdentifier", "HKDataType", "HKCategoryTypeIdentifier")
+dfRecordFormatted <- dfRecord %>%
+  mutate(device = gsub(".*(name:)|,.*", "",device),
+         value = as.numeric(as.character(value)),
+         # TODO: Extract timezone programmatically
+         endDate = ymd_hms(endDate,tz="Australia/Melbourne"),
+         date = date(endDate),
+         year = year(endDate),
+         month = month(endDate),
+         day = day(endDate),
+         yday = yday(endDate),
+         wday = wday(endDate),
+         hour = hour(endDate),
+         minute = minute(endDate),
+         type = gsub("([A-Z])", " \\1", str_remove_all(type, str_c(recordTypePrefix, collapse="|")))
+         )
+```
+Unique data types within Record-
+```{r}
+dfRecordFormatted %>% select(type) %>% distinct()
+```
+Visualising data
+```{r}
+dfRecordFormatted %>%
+  arrange(endDate) %>% 
+  filter(type == ' Resting Heart Rate') %>% 
+  filter(endDate >= as.Date("2020-01-01"), endDate < as.Date("2021-01-01")) %>%
+  
+  ggplot(aes(x= date, y = value)) +
+    geom_point(alpha = 0.3) +
+    geom_smooth(span = 0.2, col = "grey30", se = FALSE) +
+    labs(title = "Resting Heart Rate	")
+```
+```{r}
+dfRecordFormatted %>%
+  filter(type %in% c(' Heart Rate')) %>% 
+  group_by(type, hour) %>% 
+  summarise(value = mean(value)) %>% 
+  ggplot(aes(x = hour, y = value, fill = value)) +
+  geom_col() +
+  scale_fill_continuous(low = 'grey70', high = "#008FD5") +
+  scale_x_continuous(
+    breaks = c(0, 6, 12, 18),
+    label = c("Midnight", "6 AM", "Midday", "6 PM")
+  ) +
+  labs(title = "Apple Health Data",
+       subtitle = "Hourly Data Sample") +
+  facet_wrap(~ type)+
+  guides(fill=FALSE)
+```
+
+
+
+```{r}
+dfRecordFormatted %>%
+  filter(type == ' Step Count') %>% 
+  group_by(date,wday,hour) %>% 
+  summarize(steps=sum(value)) %>% 
+  group_by(hour,wday) %>% 
+  summarize(steps=sum(steps)) %>% 
+  arrange(desc(steps)) %>%
+
+  ggplot(aes(x=hour, y=wday,  fill=steps)) + 
+    geom_tile(col = 'grey40') + 
+    scale_fill_continuous(labels = scales::comma, low = 'grey95', high = '#F67164') +
+    theme(panel.grid.major = element_blank()) +
+    scale_x_continuous(
+      breaks = c(0, 6, 12, 18),
+      label = c("Midnight", "6 AM", "Midday", "6 PM")
+    ) +
+    scale_y_reverse(
+      breaks = c(1,2,3,4,5,6,7),
+      label = c("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+    ) +
+    labs(title = "Weekly Step Count Heatmap") +
+    guides(fill=FALSE)+
+    coord_equal()
+```
+
+### Activity Element
+```{r}
+dfActivityFormatted <- dfActivity %>% 
+  filter(dateComponents >= as.Date("2020-01-01"), dateComponents < as.Date("2021-01-01")) %>%
+  select(-activeEnergyBurnedUnit) %>% 
+  mutate_all(as.character) %>% 
+  mutate(date = as.Date(dateComponents)) %>% 
+  select(-dateComponents) %>% 
+  mutate_if(is.character, as.numeric) %>% 
+  rename(move = activeEnergyBurned,
+         exercise = appleExerciseTime,
+         stand = appleStandHours,
+         move_goal = activeEnergyBurnedGoal,
+         exercise_goal = appleExerciseTimeGoal,
+         stand_goal = appleStandHoursGoal) %>% 
+#Now, create 2 new metrics: percent of goal and a "Yes/No" flag.
+  mutate(move_pct = move/move_goal,
+         exercise_pct = exercise/exercise_goal,
+         stand_pct = stand/stand_goal,
+         move_bool = if_else(move_pct < 1, FALSE, TRUE),
+         exercise_bool = if_else(exercise_pct < 1, FALSE, TRUE),
+         stand_bool = if_else(stand_pct < 1, FALSE, TRUE))
+```
+
+```{r}
+dfActivityTallValue <- dfActivityFormatted %>% 
+  select(date, Move = move, Exercise = exercise, Stand = stand) %>% 
+  gather(category, value, -date)
+
+dfActivityTallPercentage <- dfActivityFormatted %>% 
+  select(date, Move = move_pct, Exercise = exercise_pct, Stand = stand_pct) %>% 
+  gather(category, pct, -date)
+
+dfActivityTallBool <- dfActivityFormatted %>% 
+  select(date, Move = move_bool, Exercise = exercise_bool, Stand = stand_bool) %>% 
+  gather(category, boolean, -date)
+  
+dfActivityTall <- dfActivityTallValue %>% 
+  left_join(dfActivityTallPercentage, by = c("date", "category")) %>% 
+  left_join(dfActivityTallBool, by = c("date", "category")) %>% 
+  mutate(
+         month = ymd(paste(year(date), month(date), 1, sep = "-")),
+         week = date - wday(date) + 1,
+         wday = wday(date),
+         day = day(date))
+
+dfActivityTall %>% 
+  filter(boolean == TRUE) %>% 
+  ggplot(aes(x = wday, y = week, fill = category)) +
+    geom_tile(col = "grey50", na.rm = FALSE) +
+    theme(panel.grid.major = element_blank()) +
+    facet_wrap(~ category) +
+    coord_fixed(ratio = 0.15) +
+    guides(fill=FALSE) +
+    labs(title = "Apple Watch goals completion") +
+    theme(axis.text.x = element_blank())
+```
+
